@@ -1,0 +1,143 @@
+/* -*- Mode: C; indent-tabs-mode: t; c-basic-offset: 4; tab-width: 4 -*-  */
+/*
+ * main.c
+ * Copyright (C) 2019 ?????????????????? ???????????? ???????????????????? <abrakadabra21099@gmail.com>
+ * 
+ * testask-server is free software: you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the
+ * Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ * 
+ * testask-server is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ * 
+ * You should have received a copy of the GNU General Public License along
+ * with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <common.h>
+#include <netdb.h>
+#include <string.h>
+#include <arpa/inet.h>
+
+int main() {
+    int sock;
+	struct addrinfo hint, *res;
+	memset(&hint, 0, sizeof hint);
+	hint.ai_family = AF_INET;
+	hint.ai_socktype = SOCK_DGRAM;
+	hint.ai_flags = AI_PASSIVE;
+	char port[6];
+	sprintf(port, "%u", SERVER_LISTEN_PORT);
+	getaddrinfo(NULL, port, &hint, &res);
+//    sock = socket(AF_INET, SOCK_DGRAM, 0);
+    sock = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if(sock < 0)
+    {
+        perror("socket");
+        exit(1);
+    }
+    
+//    addr.sin_family = AF_INET;
+//    addr.sin_port = htons(SERVER_LISTEN_PORT);
+//    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+//    if(bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+    if(bind(sock, res->ai_addr, res->ai_addrlen) < 0)
+    {
+        perror("bind");
+        exit(2);
+    }
+    struct SINGLE_MSG buf, msg[TEN_SERIES_MSG_COUNT];
+    ssize_t bytes_read;
+
+	struct sockaddr_in from;
+	socklen_t fromlen = sizeof from;
+	char s[INET_ADDRSTRLEN];
+	
+    while(1) {
+		
+		memset(&msg, 0, sizeof msg);	
+		for (short int i = 0; i < TEN_SERIES_MSG_COUNT; i++) {
+			msg[i].head.MSG_ID = -1;
+		}
+		buf.head.MSG_ID = -1;
+		short int lost = 0;
+		int clientsock = get_sock();
+		do {
+			do {
+				
+//				**********			
+				struct timeval timeout = {(buf.head.MSG_ID == -1)*60, 500000};
+				fd_set set;
+				FD_ZERO( &set );
+				FD_SET( sock, &set );
+
+				int selret = select(sock+1, &set, NULL, NULL, &timeout); 
+				if (selret == -1) {
+					perror("select");
+					exit(1);
+				};
+				if (selret == 0) { 
+					if (buf.head.MSG_ID != -1) printf("Got receive timeout....\n");
+					break; 
+				};
+//				**********
+			
+	        	bytes_read = recvfrom(sock, (void *)&buf, sizeof buf, 
+                              0, (struct sockaddr *)&from, &fromlen);
+			
+				printf("Got packet from %s:%d, %ld bytes read.\n",
+					inet_ntop(AF_INET, (void *)&from.sin_addr.s_addr, s, sizeof s),
+				       ntohs( from.sin_port ), 
+			    	   bytes_read);
+				if (bytes_read > 0) 
+					printf("Msg ID: %d, msg operation: %d, msg size: %d\n",
+		                           buf.head.MSG_ID, 
+		                           buf.head.MSG_OPERATION, 
+		                           buf.head.MSG_SIZE );
+				if (buf.head.MSG_ID < TEN_SERIES_MSG_COUNT) {
+					memcpy(
+				       &msg[buf.head.MSG_ID],
+				       &buf,
+				       bytes_read
+					);
+				} else { 
+					printf("* Incorrect packet recived, drop it.\n");
+				}
+
+			} while (( buf.head.MSG_ID != (TEN_SERIES_MSG_COUNT-1) ) 
+			    && (buf.head.MSG_OPERATION != 2));
+
+			lost = 0;
+//			**********Lost packets calc and request it.			
+			for (short int i = 0; i <= 
+			     buf.head.MSG_ID + ((buf.head.MSG_ID != (TEN_SERIES_MSG_COUNT-1))&&(buf.head.MSG_OPERATION != 2)); i++) {
+				if (msg[i].head.MSG_ID != -1) continue;
+
+				lost++;
+				struct SINGLE_MSG_HEAD request = {1, i, 0};
+				sent_one_packet(clientsock, from, &request, sizeof request);
+				printf("* < Sent request for lost packet with id: %d\n", i);
+
+			}	
+		} while (lost != 0);
+		if ( buf.head.MSG_ID >=0 ) {
+			struct SINGLE_MSG_HEAD confirm = {2, buf.head.MSG_ID, 0};
+			printf("* Ten series full recived, last msg id: %d\n", buf.head.MSG_ID);
+			sent_one_packet(clientsock, from, &confirm, sizeof confirm);
+			printf("* < Sent ten series confirmation.\n");
+	
+			close(clientsock);
+		};
+    }
+	return (0);
+}
+
